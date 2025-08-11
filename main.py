@@ -1,4 +1,4 @@
-
+from aiogram.client.default import DefaultBotProperties
 import asyncio
 import os
 import sqlite3
@@ -24,7 +24,7 @@ MORNING_TIME = (10, 0)
 DAY_TIME = (15, 0)
 EVENING_TIME = (21, 0)
 
-bot = Bot(BOT_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone=TZ)
 
