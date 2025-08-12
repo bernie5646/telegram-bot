@@ -5,3 +5,7 @@ pydantic==2.8.2
 python-dotenv==1.0.1
 sqlalchemy==2.0.31
 tzdata==2024.1
+gspread==6.1.2
+google-auth==2.31.0
+matplotlib==3.9.0
+numpy==1.26.4
