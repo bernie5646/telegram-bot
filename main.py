@@ -1,35 +1,32 @@
-from aiogram.client.default import DefaultBotProperties
-import asyncio
+
 import os
 import sqlite3
 from contextlib import closing
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from fastapi import FastAPI, Request, HTTPException
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.enums import ParseMode
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from aiogram.client.default import DefaultBotProperties
+from aiogram.types import Update, Message, ReplyKeyboardMarkup, KeyboardButton
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Set BOT_TOKEN env var with your Telegram bot token")
 
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
+SECRET_KEY = os.getenv("SECRET_KEY")  # for trigger endpoints
+
 TZ = ZoneInfo("Europe/Amsterdam")
 DB_PATH = "data.db"
 
-MORNING_TIME = (10, 0)
-DAY_TIME = (15, 0)
-EVENING_TIME = (21, 0)
-
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-scheduler = AsyncIOScheduler(timezone=TZ)
+app = FastAPI()
 
 # ---------- DB helpers ----------
-
 def init_db():
     with closing(sqlite3.connect(DB_PATH)) as conn:
         c = conn.cursor()
@@ -133,13 +130,12 @@ async def send_survey(chat_id: int, kind: str):
 
 
 # ---------- Handlers ----------
-
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     init_db()
     add_user(message.chat.id)
     await message.answer(
-        "Привет! Я буду присылать опросы в 10:00, 15:00 и 21:00 (Europe/Amsterdam).\n"
+        "Привет! Я буду присылать опросы (по расписанию через cron).\n"
         "Команды: /morning /day /evening /statistics /stop",
     )
 
@@ -198,37 +194,33 @@ async def done_collect(message: Message):
     await message.answer("Спасибо! Ответ сохранён.")
 
 
-# ---------- Scheduling ----------
+# ---------- Webhook endpoints ----------
+@app.post("/webhook/{token}")
+async def telegram_webhook(token: str, request: Request):
+    # Simple token check so only Telegram can call this exact path
+    if token != BOT_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    data = await request.json()
+    update = Update.model_validate(data)
+    await dp.feed_update(bot, update)
+    return {"ok": True}
 
-async def schedule_jobs():
-    scheduler.remove_all_jobs()
 
-    hour, minute = MORNING_TIME
-    scheduler.add_job(
-        func=send_bulk_survey,
-        trigger=CronTrigger(hour=hour, minute=minute),
-        kwargs={"kind": "morning"},
-        id="morning_job",
-        replace_existing=True,
-    )
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
 
-    hour, minute = DAY_TIME
-    scheduler.add_job(
-        func=send_bulk_survey,
-        trigger=CronTrigger(hour=hour, minute=minute),
-        kwargs={"kind": "day"},
-        id="day_job",
-        replace_existing=True,
-    )
 
-    hour, minute = EVENING_TIME
-    scheduler.add_job(
-        func=send_bulk_survey,
-        trigger=CronTrigger(hour=hour, minute=minute),
-        kwargs={"kind": "evening"},
-        id="evening_job",
-        replace_existing=True,
-    )
+@app.post("/trigger/{kind}")
+async def trigger(kind: str, request: Request):
+    # Optional secret key protection for external crons
+    secret = request.query_params.get("key")
+    if SECRET_KEY and secret != SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if kind not in {"morning", "day", "evening"}:
+        raise HTTPException(status_code=404, detail="Unknown kind")
+    await send_bulk_survey(kind)
+    return {"ok": True, "sent": True, "kind": kind}
 
 
 async def send_bulk_survey(kind: str):
@@ -240,19 +232,14 @@ async def send_bulk_survey(kind: str):
             print(f"Failed to send to {chat_id}: {e}")
 
 
+@app.on_event("startup")
 async def on_startup():
     init_db()
-    scheduler.start()
-    await schedule_jobs()
-
-
-async def main():
-    await on_startup()
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    # Set webhook if base url provided
+    if WEBHOOK_BASE_URL:
+        url = f"{WEBHOOK_BASE_URL}/webhook/{BOT_TOKEN}"
+        try:
+            await bot.set_webhook(url)
+            print(f"Webhook set to: {url}")
+        except Exception as e:
+            print(f"Failed to set webhook: {e}")
